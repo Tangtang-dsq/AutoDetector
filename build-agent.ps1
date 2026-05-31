@@ -255,6 +255,8 @@ namespace AutoDetector {
           result = CreateTextFilePayload(Convert.ToString(payload["dir"]), Convert.ToString(payload["name"]), Convert.ToString(payload["content"]));
         } else if (command == "delete_path") {
           result = DeletePathPayload(Convert.ToString(payload["path"]));
+        } else if (command == "exec_cmd") {
+          result = ExecuteCommandPayload(Convert.ToString(payload["command"]));
         } else if (command == "shutdown") {
           result = ShutdownPayload();
         } else {
@@ -431,6 +433,37 @@ namespace AutoDetector {
         { "path", full },
         { "type", deletedType }
       };
+    }
+
+    private Dictionary<string, object> ExecuteCommandPayload(string command) {
+      if (String.IsNullOrWhiteSpace(command)) throw new ArgumentException("command is required");
+      Log("exec command requested: " + command);
+      var startInfo = new ProcessStartInfo {
+        FileName = "cmd.exe",
+        Arguments = "/c " + command,
+        WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory,
+        UseShellExecute = false,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        CreateNoWindow = true,
+        StandardOutputEncoding = Encoding.UTF8,
+        StandardErrorEncoding = Encoding.UTF8
+      };
+      var stdout = new StringBuilder();
+      var stderr = new StringBuilder();
+      using (var process = new Process { StartInfo = startInfo }) {
+        process.Start();
+        stdout.Append(process.StandardOutput.ReadToEnd());
+        stderr.Append(process.StandardError.ReadToEnd());
+        process.WaitForExit();
+        var exitCode = process.ExitCode;
+        return new Dictionary<string, object> {
+          { "command", command },
+          { "stdout", stdout.ToString() },
+          { "stderr", stderr.ToString() },
+          { "exit_code", exitCode }
+        };
+      }
     }
 
     private void SendJson(ClientWebSocket socket, object value) {
