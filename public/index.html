@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AutoDetector</title>
+  <link rel="stylesheet" href="https://unpkg.com/layui@2.9.21/dist/css/layui.css">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-layout">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-badge">A</span>
+        <div>
+          <div class="brand-title">AutoDetector</div>
+          <div class="brand-subtitle">远程设备与文件管理</div>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span id="statusBadge" class="layui-badge layui-bg-gray">未连接</span>
+        <button id="logoutButton" class="layui-btn layui-btn-primary layui-btn-sm">退出</button>
+      </div>
+    </header>
+
+    <main class="main-grid">
+      <aside class="sidebar">
+        <div class="panel-head">
+          <div>
+            <div class="panel-title">在线设备</div>
+            <div class="panel-meta"><span id="deviceCount">0</span> 台设备</div>
+          </div>
+          <button id="refreshAgentsButton" class="layui-btn layui-btn-primary layui-btn-sm" title="刷新设备">刷新</button>
+        </div>
+        <div id="agents" class="device-list"></div>
+      </aside>
+
+      <section class="workspace">
+        <div class="toolbar">
+          <div class="nav-group layui-btn-group">
+            <button id="backButton" class="layui-btn layui-btn-primary layui-btn-sm" title="后退" disabled><i class="layui-icon layui-icon-left"></i></button>
+            <button id="forwardButton" class="layui-btn layui-btn-primary layui-btn-sm" title="前进" disabled><i class="layui-icon layui-icon-right"></i></button>
+            <button id="upButton" class="layui-btn layui-btn-primary layui-btn-sm" title="上一级" disabled><i class="layui-icon layui-icon-up"></i></button>
+            <button id="refreshButton" class="layui-btn layui-btn-primary layui-btn-sm" title="刷新" disabled><i class="layui-icon layui-icon-refresh"></i></button>
+          </div>
+          <div class="path-search">
+            <input id="pathInput" class="layui-input" value="请选择设备" disabled>
+            <button id="openPathButton" class="layui-btn layui-btn-sm" disabled>打开</button>
+            <button id="newFileButton" class="layui-btn layui-btn-primary layui-btn-sm" disabled>新建文件</button>
+          </div>
+        </div>
+
+        <div class="content-head">
+          <div>
+            <h2 id="folderTitle">文件管理器</h2>
+            <p id="folderMeta">等待设备连接</p>
+          </div>
+          <div id="currentAgent" class="agent-chip">未选择设备</div>
+        </div>
+
+        <div id="content" class="content-body">
+          <div class="empty-state">
+            <i class="layui-icon layui-icon-console"></i>
+            <p>等待设备连接或选择左侧磁盘。</p>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/layui@2.9.21/dist/layui.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
