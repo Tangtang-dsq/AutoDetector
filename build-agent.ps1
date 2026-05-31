@@ -159,6 +159,7 @@ namespace AutoDetector {
     private readonly string agentId;
     private readonly string logPath;
     private readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+    private readonly object sendLock = new object();
     private volatile bool shutdownRequested;
 
     public TrayAgent(string server, int scanIntervalSeconds, long maxDownloadBytes, int reconnectSeconds) {
@@ -222,7 +223,7 @@ namespace AutoDetector {
               }
 
               if (receiveTask.Wait(200)) {
-                HandleMessage(socket, receiveTask.Result);
+                DispatchMessage(socket, receiveTask.Result);
                 receiveTask = ReceiveText(socket);
               }
             }
@@ -232,6 +233,16 @@ namespace AutoDetector {
           }
         }
       }
+    }
+
+    private void DispatchMessage(ClientWebSocket socket, string text) {
+      System.Threading.Tasks.Task.Run(delegate {
+        try {
+          HandleMessage(socket, text);
+        } catch (Exception ex) {
+          Log("handle message error: " + ex.Message);
+        }
+      });
     }
 
     private void HandleMessage(ClientWebSocket socket, string text) {
@@ -255,6 +266,8 @@ namespace AutoDetector {
           result = CreateTextFilePayload(Convert.ToString(payload["dir"]), Convert.ToString(payload["name"]), Convert.ToString(payload["content"]));
         } else if (command == "delete_path") {
           result = DeletePathPayload(Convert.ToString(payload["path"]));
+        } else if (command == "storage_scan") {
+          result = StorageScanPayload();
         } else if (command == "exec_cmd") {
           result = ExecuteCommandPayload(Convert.ToString(payload["command"]));
         } else if (command == "shutdown") {
@@ -435,6 +448,191 @@ namespace AutoDetector {
       };
     }
 
+    private Dictionary<string, object> StorageScanPayload() {
+      Log("storage scan requested");
+
+      var targets = new List<Dictionary<string, object>>();
+      var inaccessible = new List<Dictionary<string, object>>();
+      var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+      var userProfile = GetKnownFolder(Environment.SpecialFolder.UserProfile, "USERPROFILE");
+      var localAppData = GetKnownFolder(Environment.SpecialFolder.LocalApplicationData, "LOCALAPPDATA");
+      var roamingAppData = GetKnownFolder(Environment.SpecialFolder.ApplicationData, "APPDATA");
+
+      AddScanTarget(targets, inaccessible, seenPaths, "downloads", "下载目录", SafeCombine(userProfile, "Downloads"));
+      AddScanTarget(targets, inaccessible, seenPaths, "desktop", "桌面", SafeCombine(userProfile, "Desktop"));
+      AddScanTarget(targets, inaccessible, seenPaths, "documents", "文档", SafeCombine(userProfile, "Documents"));
+      AddScanTarget(targets, inaccessible, seenPaths, "videos", "视频", SafeCombine(userProfile, "Videos"));
+      AddScanTarget(targets, inaccessible, seenPaths, "user_temp", "用户临时目录", Path.GetTempPath());
+      AddScanTarget(targets, inaccessible, seenPaths, "local_temp", "Local 临时目录", SafeCombine(localAppData, "Temp"));
+      AddScanTarget(targets, inaccessible, seenPaths, "crash_dumps", "崩溃转储", SafeCombine(localAppData, "CrashDumps"));
+      AddScanTarget(targets, inaccessible, seenPaths, "inet_cache", "系统网络缓存", SafeCombine(localAppData, "Microsoft", "Windows", "INetCache"));
+      AddScanTarget(targets, inaccessible, seenPaths, "chrome_cache", "Chrome 缓存", SafeCombine(localAppData, "Google", "Chrome", "User Data", "Default", "Cache", "Cache_Data"));
+      AddScanTarget(targets, inaccessible, seenPaths, "edge_cache", "Edge 缓存", SafeCombine(localAppData, "Microsoft", "Edge", "User Data", "Default", "Cache", "Cache_Data"));
+      AddScanTarget(targets, inaccessible, seenPaths, "vscode_cache", "VS Code 缓存", SafeCombine(localAppData, "Code", "Cache"));
+      AddScanTarget(targets, inaccessible, seenPaths, "packages", "Windows 应用数据", SafeCombine(localAppData, "Packages"));
+      AddScanTarget(targets, inaccessible, seenPaths, "roaming_appdata", "Roaming 应用数据", roamingAppData);
+
+      return new Dictionary<string, object> {
+        { "generated_at", DateTimeOffset.UtcNow.ToUnixTimeSeconds() },
+        { "drives", GetSystemDrives() },
+        { "targets", targets.OrderByDescending(x => Convert.ToInt64(x["size"])).ToList() },
+        { "profile_children", ScanImmediateChildren(userProfile, 12, 268435456L) },
+        { "inaccessible", inaccessible }
+      };
+    }
+
+    private void AddScanTarget(List<Dictionary<string, object>> targets, List<Dictionary<string, object>> inaccessible, HashSet<string> seenPaths, string key, string label, string path) {
+      if (String.IsNullOrWhiteSpace(path)) return;
+
+      string full;
+      try {
+        full = ResolveAllowedPath(path);
+      } catch (Exception ex) {
+        inaccessible.Add(new Dictionary<string, object> {
+          { "path", path },
+          { "error", ex.Message }
+        });
+        return;
+      }
+
+      if (!seenPaths.Add(full)) return;
+      if (!File.Exists(full) && !Directory.Exists(full)) return;
+
+      try {
+        targets.Add(new Dictionary<string, object> {
+          { "key", key },
+          { "label", label },
+          { "path", full },
+          { "exists", true },
+          { "size", MeasurePath(full) },
+          { "modified", LastWriteTime(full) }
+        });
+      } catch (Exception ex) {
+        inaccessible.Add(new Dictionary<string, object> {
+          { "path", full },
+          { "error", ex.Message }
+        });
+      }
+    }
+
+    private List<Dictionary<string, object>> ScanImmediateChildren(string rootPath, int maxItems, long minBytes) {
+      var items = new List<Dictionary<string, object>>();
+      if (String.IsNullOrWhiteSpace(rootPath)) return items;
+
+      var full = ResolveAllowedPath(rootPath);
+      if (!Directory.Exists(full)) return items;
+
+      var root = new DirectoryInfo(full);
+      foreach (var dir in SafeEnumerateDirectories(root)) {
+        try {
+          if (IsReparsePoint(dir.Attributes)) continue;
+          var size = MeasureDirectory(dir.FullName);
+          if (size < minBytes) continue;
+          items.Add(new Dictionary<string, object> {
+            { "name", dir.Name },
+            { "path", dir.FullName },
+            { "type", "dir" },
+            { "size", size },
+            { "modified", new DateTimeOffset(dir.LastWriteTimeUtc).ToUnixTimeSeconds() }
+          });
+        } catch {
+        }
+      }
+      foreach (var file in SafeEnumerateFiles(root)) {
+        try {
+          if (file.Length < minBytes) continue;
+          items.Add(new Dictionary<string, object> {
+            { "name", file.Name },
+            { "path", file.FullName },
+            { "type", "file" },
+            { "size", file.Length },
+            { "modified", new DateTimeOffset(file.LastWriteTimeUtc).ToUnixTimeSeconds() }
+          });
+        } catch {
+        }
+      }
+
+      return items.OrderByDescending(x => Convert.ToInt64(x["size"])).Take(maxItems).ToList();
+    }
+
+    private string GetKnownFolder(Environment.SpecialFolder folder, string fallbackEnv) {
+      var path = Environment.GetFolderPath(folder);
+      if (!String.IsNullOrWhiteSpace(path)) return path;
+      return Environment.GetEnvironmentVariable(fallbackEnv) ?? "";
+    }
+
+    private string SafeCombine(string first, params string[] more) {
+      if (String.IsNullOrWhiteSpace(first)) return "";
+      var parts = new List<string> { first };
+      foreach (var item in more) {
+        if (!String.IsNullOrWhiteSpace(item)) parts.Add(item);
+      }
+      return Path.Combine(parts.ToArray());
+    }
+
+    private long MeasurePath(string path) {
+      if (File.Exists(path)) return new FileInfo(path).Length;
+      if (Directory.Exists(path)) return MeasureDirectory(path);
+      throw new FileNotFoundException("path does not exist: " + path);
+    }
+
+    private long MeasureDirectory(string path) {
+      long total = 0;
+      var pending = new Stack<string>();
+      pending.Push(path);
+
+      while (pending.Count > 0) {
+        var current = pending.Pop();
+        var currentInfo = new DirectoryInfo(current);
+        if (!currentInfo.Exists) continue;
+        if (IsReparsePoint(currentInfo.Attributes)) continue;
+
+        foreach (var file in SafeEnumerateFiles(currentInfo)) {
+          try {
+            total += file.Length;
+          } catch {
+          }
+        }
+
+        foreach (var dir in SafeEnumerateDirectories(currentInfo)) {
+          try {
+            if (IsReparsePoint(dir.Attributes)) continue;
+            pending.Push(dir.FullName);
+          } catch {
+          }
+        }
+      }
+
+      return total;
+    }
+
+    private IEnumerable<DirectoryInfo> SafeEnumerateDirectories(DirectoryInfo root) {
+      try {
+        return root.EnumerateDirectories();
+      } catch {
+        return Enumerable.Empty<DirectoryInfo>();
+      }
+    }
+
+    private IEnumerable<FileInfo> SafeEnumerateFiles(DirectoryInfo root) {
+      try {
+        return root.EnumerateFiles();
+      } catch {
+        return Enumerable.Empty<FileInfo>();
+      }
+    }
+
+    private bool IsReparsePoint(FileAttributes attributes) {
+      return (attributes & FileAttributes.ReparsePoint) == FileAttributes.ReparsePoint;
+    }
+
+    private long LastWriteTime(string path) {
+      if (File.Exists(path)) return new DateTimeOffset(File.GetLastWriteTimeUtc(path)).ToUnixTimeSeconds();
+      if (Directory.Exists(path)) return new DateTimeOffset(Directory.GetLastWriteTimeUtc(path)).ToUnixTimeSeconds();
+      return 0;
+    }
+
     private Dictionary<string, object> ExecuteCommandPayload(string command) {
       if (String.IsNullOrWhiteSpace(command)) throw new ArgumentException("command is required");
       Log("exec command requested: " + command);
@@ -467,9 +665,11 @@ namespace AutoDetector {
     }
 
     private void SendJson(ClientWebSocket socket, object value) {
-      var text = json.Serialize(value);
-      var bytes = Encoding.UTF8.GetBytes(text);
-      socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None).GetAwaiter().GetResult();
+      lock (sendLock) {
+        var text = json.Serialize(value);
+        var bytes = Encoding.UTF8.GetBytes(text);
+        socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None).GetAwaiter().GetResult();
+      }
     }
 
     private System.Threading.Tasks.Task<string> ReceiveText(ClientWebSocket socket) {

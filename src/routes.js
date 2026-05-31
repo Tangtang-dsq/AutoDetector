@@ -3,7 +3,7 @@
 const { contentDisposition, httpError, readBody, sendHttp, sendJson, serveStaticFile } = require("./http-utils");
 
 function createRequestHandler(options) {
-  const { registry, sessions, publicDir } = options;
+  const { registry, sessions, publicDir, storageAssistant, storageAiSettings } = options;
 
   return async function handleRequest(req, res) {
     const url = new URL(req.url, `http://${req.headers.host || "127.0.0.1"}`);
@@ -38,6 +38,28 @@ function createRequestHandler(options) {
 
       if (req.method === "GET" && url.pathname === "/api/agents") {
         sendJson(res, 200, registry.snapshot());
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/settings/storage-ai") {
+        sendJson(res, 200, storageAiSettings.getPublic());
+        return;
+      }
+
+      if (req.method === "PUT" && url.pathname === "/api/settings/storage-ai") {
+        const body = await readBody(req, 64 * 1024);
+        let payload;
+        try {
+          payload = JSON.parse(body || "{}");
+        } catch {
+          throw httpError(400, "invalid JSON");
+        }
+        sendJson(res, 200, storageAiSettings.update(payload));
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/settings/storage-ai/test") {
+        sendJson(res, 200, await storageAssistant.testConnection());
         return;
       }
 
@@ -142,6 +164,14 @@ function createRequestHandler(options) {
         const command = String(payload.command || "").trim();
         if (!command) throw httpError(400, "command is required");
         const result = await registry.sendCommand(agentId, "exec_cmd", { command }, 120000);
+        sendJson(res, 200, result);
+        return;
+      }
+
+      const storageMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/storage-analysis$/);
+      if (req.method === "POST" && storageMatch) {
+        const agentId = decodeURIComponent(storageMatch[1]);
+        const result = await storageAssistant.analyzeAgent(agentId);
         sendJson(res, 200, result);
         return;
       }

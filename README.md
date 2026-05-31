@@ -18,6 +18,8 @@ AutoDetector 是一个 Windows 设备静默检测与远程文件管理工具。�
 - 在线删除文件或文件夹，Agent 会拒绝删除盘符根目录。
 - 后台主动断开指定 Agent，也就是关闭目标机器上的 `AutoDetectorAgent.exe`。
 - 后台远程执行基础 `cmd.exe /c` 命令，弹窗中默认选中当前设备，也可切换其他在线设备。
+- 后台内置 `storage-analyzer` 风格的“智能清理”面板：远程扫描 Windows 常见缓存、下载目录和用户目录，按绿/黄/红三级给出建议，并可直接清理绿灯项。
+- 后台支持前端显式配置智能清理使用的大模型，请求地址、Model ID、超时和 API Key 都可在网页里修改。
 - Agent 无控制台窗口、无任务栏窗口、无托盘图标。
 - Agent 断线自动重连，Server 通过心跳识别离线。
 - layui 响应式后台页面，支持桌面和移动端浏览器。
@@ -36,6 +38,8 @@ AutoDetector
 │  ├─ simple-websocket.js
 │  ├─ ws-handlers.js
 │  ├─ config.js
+│  ├─ storage-assistant.js
+│  ├─ storage-ai-settings.js
 │  └─ http-utils.js
 ├─ public/                # Web 后台页面
 │  ├─ index.html
@@ -43,7 +47,8 @@ AutoDetector
 │  ├─ app.js
 │  ├─ login.js
 │  └─ styles.css
-└─ build-agent.ps1        # Windows Agent 生成脚本
+├─ build-agent.ps1        # Windows Agent 生成脚本
+└─ storage-ai.settings.json  # 前端保存的模型配置文件，可选
 ```
 
 Server 后端只使用 Node.js 内置模块，不需要 `npm install`。Web 页面通过 CDN 加载 layui，浏览器需要能访问 layui CDN。
@@ -104,10 +109,36 @@ node server.js --host 0.0.0.0 --port 8000
 node server.js `
   --host 0.0.0.0 `
   --port 8000 `
-  --agent-timeout-ms 15000
+  --agent-timeout-ms 15000 `
+  --storage-ai-base-url https://lucen.run `
+  --storage-ai-model gpt-5.4 `
+  --storage-ai-api-key "your-api-key"
 ```
 
 `--agent-timeout-ms` 表示多久没有收到 Agent 心跳后判定离线，默认 15000 毫秒。
+
+智能清理模型参数：
+
+- `--storage-ai-base-url`：模型服务地址，默认 `https://lucen.run`
+- `--storage-ai-model`：模型 ID，默认 `gpt-5.4`
+- `--storage-ai-api-key`：模型 API Key，未配置时仍可用本地规则分析，但不会生成 AI 总结
+- `--storage-ai-timeout-ms`：模型请求超时，默认 45000 毫秒
+
+也支持环境变量：
+
+```powershell
+$env:AUTODETECTOR_STORAGE_AI_BASE_URL = "https://lucen.run"
+$env:AUTODETECTOR_STORAGE_AI_MODEL = "gpt-5.4"
+$env:AUTODETECTOR_STORAGE_AI_API_KEY = "your-api-key"
+node server.js --host 0.0.0.0 --port 8000
+```
+
+如果希望把前端保存的模型配置文件放到别的位置，也可以指定：
+
+```powershell
+node server.js `
+  --storage-ai-config-path "C:\AutoDetector\storage-ai.settings.json"
+```
 
 ## 生成 Agent
 
@@ -200,6 +231,27 @@ dist\agent\AutoDetectorAgent.exe
 - `删除`：删除文件或文件夹。删除文件夹会递归删除其中内容。
 - `断开设备`：关闭目标机器上的 Agent 进程。
 - `命令执行`：点击顶部按钮后弹窗选择在线设备、输入命令、等待执行结果；返回 `stdout`、`stderr` 和退出码。
+- `智能清理`：点击顶部按钮后对目标设备执行只读扫描，生成缓存/下载/应用数据三级建议。绿灯项可直接清理，黄红灯项建议先打开目录人工确认。
+- `模型配置`：点击顶部按钮后可直接在网页里查看和修改智能清理的大模型请求地址、Model ID、超时和 API Key。保存后会写入 `storage-ai.settings.json`，下次启动仍会生效。
+- `测试连接`：在“模型配置”窗口内可直接向当前配置的模型发一条最小测试请求，用来确认地址、模型名和 API Key 是否真的可用。
+
+## 智能清理说明
+
+- 新版 Agent 新增了 `storage_scan` 命令，所以要先重新运行 `.\build-agent.ps1` 生成新的 `AutoDetectorAgent.exe`，再部署到目标机器。
+- 智能清理只扫描用户态常见目录，例如 `Temp`、浏览器缓存、`Downloads`、`Desktop`、`Documents`、`Videos`、`AppData` 等。
+- 扫描阶段全程只读，不会自动删除。
+- 绿灯项默认是可再生缓存或临时文件，前端会给出“清理目录”按钮。
+- 黄灯项和红灯项只给“打开目录”按钮，避免误删用户数据或应用数据。
+- 如果模型接口不可用，页面仍会展示本地规则分析结果，只是不会有 AI 总结。
+- 当前代码按 OpenAI 兼容方式请求模型：`POST {baseUrl}/v1/chat/completions`，所以如果 `lucen.run` 不是这套兼容格式，就需要把 `src/storage-assistant.js` 里的请求格式改成它实际要求的协议。
+- 如果后台出现 `agent timed out`，先确认你已经重新生成并部署了新版 Agent。旧版 Agent 在执行大目录扫描时会阻塞心跳；新版已经改成命令后台执行，扫描过程中仍会继续发 `ping`。
+- 如果设备本身很慢、网络抖动明显，也可以把服务端的 `--agent-timeout-ms` 从默认 `15000` 提高到 `60000` 再观察。
+
+## 排障速查
+
+- `agent timed out`：优先确认目标机器运行的是新版 `AutoDetectorAgent.exe`，然后查看 `%APPDATA%\AutoDetector\tray-agent.log`。如果网络抖动或设备较慢，再把服务端 `--agent-timeout-ms` 提高到 `60000`。
+- 模型测试失败：先在后台“模型配置”里点一次“测试连接”。如果失败，优先排查 4 项：`请求地址` 是否正确、`Model ID` 是否可用、`API Key` 是否有效、该中转站是否真的兼容 `POST /v1/chat/completions`。
+- 无法覆盖生成 Agent：如果 `csc.exe` 提示输出文件被占用，通常是旧的 `AutoDetectorAgent.exe` 正在运行或被杀毒/索引占用，先关闭占用进程，或者换一个新的 `-OutputDir` 重新生成。
 
 ## 日志
 

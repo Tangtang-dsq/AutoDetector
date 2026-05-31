@@ -17,9 +17,13 @@
   const refreshButton = $("#refreshButton");
   const openPathButton = $("#openPathButton");
   const newFileButton = $("#newFileButton");
+  const openModelSettingsButton = $("#openModelSettingsButton");
+  const openCleanupButton = $("#openCleanupButton");
   const openCommandButton = $("#openCommandButton");
   const refreshAgentsButton = $("#refreshAgentsButton");
   const logoutButton = $("#logoutButton");
+  let cleanupLayerIndex = null;
+  let modelSettingsLayerIndex = null;
 
   layui.use(["layer"], function () {
     layer = layui.layer;
@@ -48,6 +52,8 @@
     };
     openPathButton.onclick = openTypedPath;
     newFileButton.onclick = createFile;
+    openModelSettingsButton.onclick = openModelSettingsDialog;
+    openCleanupButton.onclick = openCleanupDialog;
     openCommandButton.onclick = openCommandDialog;
     refreshAgentsButton.onclick = loadAgents;
     pathInput.onkeydown = (event) => {
@@ -423,6 +429,360 @@
     });
   }
 
+  function openCleanupDialog() {
+    if (!state.agents.length) {
+      layer.msg("暂无在线设备", { icon: 2 });
+      return;
+    }
+    const defaultAgent = state.selectedAgent || state.agents[0].agent_id;
+    cleanupLayerIndex = layer.open({
+      type: 1,
+      title: "智能清理",
+      area: [cleanupWidth(), cleanupHeight()],
+      content: `
+        <div class="cleanup-dialog">
+          <div class="cleanup-toolbar">
+            <div class="cleanup-field">
+              <label class="command-label" for="cleanupAgent">分析设备</label>
+              <select id="cleanupAgent" class="command-select">${state.agents.map((agent) => `<option value="${escapeHtml(agent.agent_id)}"${agent.agent_id === defaultAgent ? " selected" : ""}>${escapeHtml(agent.agent_id)} · ${escapeHtml(agent.hostname || "unknown")}</option>`).join("")}</select>
+            </div>
+            <div class="cleanup-toolbar-actions">
+              <button id="runCleanupButton" class="layui-btn layui-btn-sm">开始分析</button>
+            </div>
+          </div>
+          <div class="cleanup-note">只读扫描常见缓存、下载目录和用户目录，不会自动删除任何内容。</div>
+          <div id="cleanupStatus" class="cleanup-status">选择设备后开始扫描，绿灯项可直接清理，黄红灯项建议先打开目录复查。</div>
+          <div id="cleanupResults" class="cleanup-results">
+            ${emptyHtml("template", "等待开始分析。")}
+          </div>
+        </div>
+      `,
+      success: () => {
+        const runButton = document.querySelector("#runCleanupButton");
+        if (runButton) runButton.onclick = runCleanupAnalysisFromDialog;
+        runCleanupAnalysisFromDialog();
+      },
+      end: () => {
+        cleanupLayerIndex = null;
+      },
+    });
+  }
+
+  function openModelSettingsDialog() {
+    modelSettingsLayerIndex = layer.open({
+      type: 1,
+      title: "模型配置",
+      area: [settingsWidth(), settingsHeight()],
+      content: `
+        <div class="model-settings-dialog">
+          <div class="cleanup-note">
+            这里配置智能清理调用的大模型。当前实现按 OpenAI 兼容接口请求：<code>/v1/chat/completions</code>。
+          </div>
+          <div id="modelSettingsStatus" class="cleanup-status">正在读取当前配置...</div>
+          <div class="layui-form-item">
+            <label class="command-label" for="modelBaseUrl">请求地址</label>
+            <input id="modelBaseUrl" class="layui-input" placeholder="https://lucen.run">
+          </div>
+          <div class="layui-form-item">
+            <label class="command-label" for="modelId">Model ID</label>
+            <input id="modelId" class="layui-input" placeholder="gpt-5.4">
+          </div>
+          <div class="layui-form-item">
+            <label class="command-label" for="modelTimeout">超时毫秒</label>
+            <input id="modelTimeout" class="layui-input" placeholder="45000">
+          </div>
+          <div class="layui-form-item">
+            <label class="command-label" for="modelApiKey">API Key</label>
+            <input id="modelApiKey" class="layui-input" type="password" placeholder="留空表示清空">
+            <div id="modelApiKeyHint" class="settings-hint"></div>
+          </div>
+          <div class="settings-actions">
+            <button id="saveModelSettingsButton" class="layui-btn layui-btn-sm">保存配置</button>
+            <button id="testModelSettingsButton" class="layui-btn layui-btn-warm layui-btn-sm">测试连接</button>
+            <button id="reloadModelSettingsButton" class="layui-btn layui-btn-primary layui-btn-sm">重新读取</button>
+          </div>
+          <pre id="modelTestOutput" class="command-output settings-output">等待测试结果。</pre>
+        </div>
+      `,
+      success: () => {
+        const saveButton = document.querySelector("#saveModelSettingsButton");
+        const testButton = document.querySelector("#testModelSettingsButton");
+        const reloadButton = document.querySelector("#reloadModelSettingsButton");
+        if (saveButton) saveButton.onclick = saveModelSettings;
+        if (testButton) testButton.onclick = testModelSettings;
+        if (reloadButton) reloadButton.onclick = loadModelSettings;
+        loadModelSettings();
+      },
+      end: () => {
+        modelSettingsLayerIndex = null;
+      },
+    });
+  }
+
+  async function loadModelSettings() {
+    const statusEl = document.querySelector("#modelSettingsStatus");
+    const baseUrlEl = document.querySelector("#modelBaseUrl");
+    const modelEl = document.querySelector("#modelId");
+    const timeoutEl = document.querySelector("#modelTimeout");
+    const apiKeyEl = document.querySelector("#modelApiKey");
+    const apiKeyHintEl = document.querySelector("#modelApiKeyHint");
+    if (!statusEl || !baseUrlEl || !modelEl || !timeoutEl || !apiKeyEl || !apiKeyHintEl) return;
+
+    statusEl.textContent = "正在读取当前配置...";
+    try {
+      const res = await api("/api/settings/storage-ai");
+      const settings = await res.json();
+      baseUrlEl.value = settings.base_url || "";
+      modelEl.value = settings.model || "";
+      timeoutEl.value = settings.timeout_ms || 45000;
+      apiKeyEl.value = "";
+      apiKeyHintEl.textContent = settings.has_api_key ? `当前已配置 Key：${settings.api_key_masked || "已隐藏"}` : "当前未配置 API Key。";
+      statusEl.textContent = "配置已载入。";
+    } catch (error) {
+      statusEl.textContent = error.message || "读取配置失败";
+      layer.msg(error.message || "读取配置失败", { icon: 2 });
+    }
+  }
+
+  async function saveModelSettings() {
+    const statusEl = document.querySelector("#modelSettingsStatus");
+    const baseUrlEl = document.querySelector("#modelBaseUrl");
+    const modelEl = document.querySelector("#modelId");
+    const timeoutEl = document.querySelector("#modelTimeout");
+    const apiKeyEl = document.querySelector("#modelApiKey");
+    const apiKeyHintEl = document.querySelector("#modelApiKeyHint");
+    const saveButton = document.querySelector("#saveModelSettingsButton");
+    if (!statusEl || !baseUrlEl || !modelEl || !timeoutEl || !apiKeyEl || !apiKeyHintEl || !saveButton) return;
+
+    const baseUrl = baseUrlEl.value.trim();
+    const model = modelEl.value.trim();
+    const timeoutMs = Number(timeoutEl.value);
+    const apiKey = apiKeyEl.value.trim();
+    if (!baseUrl) {
+      layer.msg("请输入请求地址", { icon: 2 });
+      baseUrlEl.focus();
+      return;
+    }
+    if (!model) {
+      layer.msg("请输入 Model ID", { icon: 2 });
+      modelEl.focus();
+      return;
+    }
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      layer.msg("请输入有效的超时毫秒", { icon: 2 });
+      timeoutEl.focus();
+      return;
+    }
+
+    saveButton.disabled = true;
+    saveButton.textContent = "保存中...";
+    statusEl.textContent = "正在保存模型配置...";
+    try {
+      const res = await api("/api/settings/storage-ai", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          base_url: baseUrl,
+          model,
+          timeout_ms: timeoutMs,
+          api_key: apiKey,
+        }),
+      });
+      const settings = await res.json();
+      apiKeyEl.value = "";
+      apiKeyHintEl.textContent = settings.has_api_key ? `当前已配置 Key：${settings.api_key_masked || "已隐藏"}` : "当前未配置 API Key。";
+      statusEl.textContent = "配置已保存。";
+      layer.msg("模型配置已保存", { icon: 1 });
+    } catch (error) {
+      statusEl.textContent = error.message || "保存失败";
+      layer.msg(error.message || "保存失败", { icon: 2 });
+    } finally {
+      saveButton.disabled = false;
+      saveButton.textContent = "保存配置";
+    }
+  }
+
+  async function testModelSettings() {
+    const outputEl = document.querySelector("#modelTestOutput");
+    const statusEl = document.querySelector("#modelSettingsStatus");
+    const testButton = document.querySelector("#testModelSettingsButton");
+    if (!outputEl || !statusEl || !testButton) return;
+
+    testButton.disabled = true;
+    testButton.textContent = "测试中...";
+    statusEl.textContent = "正在请求模型，请稍候...";
+    outputEl.textContent = "发送测试请求中...";
+    try {
+      const res = await api("/api/settings/storage-ai/test", { method: "POST" });
+      const result = await res.json();
+      statusEl.textContent = result.ok ? "模型连接测试成功。" : "模型连接测试失败。";
+      outputEl.textContent = [
+        `状态: ${result.ok ? "成功" : "失败"}`,
+        `地址: ${result.config && result.config.base_url ? result.config.base_url : "(未配置)"}`,
+        `模型: ${result.config && result.config.model ? result.config.model : "(未配置)"}`,
+        `超时: ${result.config && result.config.timeout_ms ? result.config.timeout_ms : 0} ms`,
+        `API Key: ${result.config && result.config.has_api_key ? "已配置" : "未配置"}`,
+        "",
+        result.detail || "",
+        result.response_preview ? `\n返回预览:\n${result.response_preview}` : "",
+      ].join("\n");
+      layer.msg(result.ok ? "模型连接成功" : "模型连接失败", { icon: result.ok ? 1 : 2 });
+    } catch (error) {
+      statusEl.textContent = error.message || "模型测试失败";
+      outputEl.textContent = error.message || "模型测试失败";
+      layer.msg(error.message || "模型测试失败", { icon: 2 });
+    } finally {
+      testButton.disabled = false;
+      testButton.textContent = "测试连接";
+    }
+  }
+
+  async function runCleanupAnalysisFromDialog() {
+    const agentSelect = document.querySelector("#cleanupAgent");
+    const runButton = document.querySelector("#runCleanupButton");
+    const statusEl = document.querySelector("#cleanupStatus");
+    const resultsEl = document.querySelector("#cleanupResults");
+    const agentId = agentSelect ? agentSelect.value : "";
+    if (!agentId || !runButton || !statusEl || !resultsEl) return;
+
+    runButton.disabled = true;
+    runButton.textContent = "分析中...";
+    statusEl.textContent = "正在读取设备上的常见缓存和大目录，请稍候...";
+    resultsEl.innerHTML = loadingHtml();
+    try {
+      const res = await api(`/api/agents/${encodeURIComponent(agentId)}/storage-analysis`, { method: "POST" });
+      const result = await res.json();
+      renderCleanupAnalysis(agentId, result);
+    } catch (error) {
+      statusEl.textContent = error.message || "分析失败";
+      resultsEl.innerHTML = emptyHtml("error", error.message || "分析失败");
+      layer.msg(error.message || "分析失败", { icon: 2 });
+    } finally {
+      runButton.disabled = false;
+      runButton.textContent = "开始分析";
+    }
+  }
+
+  function renderCleanupAnalysis(agentId, result) {
+    const statusEl = document.querySelector("#cleanupStatus");
+    const resultsEl = document.querySelector("#cleanupResults");
+    if (!statusEl || !resultsEl) return;
+
+    const drives = Array.isArray(result.drives) ? result.drives : [];
+    const items = Array.isArray(result.items) ? result.items : [];
+    const greenItems = items.filter((item) => item.tier === "green");
+    const yellowItems = items.filter((item) => item.tier === "yellow");
+    const redItems = items.filter((item) => item.tier === "red");
+    const priorities = Array.isArray(result.summary && result.summary.priorities) ? result.summary.priorities : [];
+    const inaccessible = Array.isArray(result.inaccessible) ? result.inaccessible : [];
+    const aiConfig = result.ai_config || {};
+    const configLine = aiConfig.base_url && aiConfig.model ? `当前模型：${aiConfig.model} @ ${aiConfig.base_url}` : "";
+    const aiLine = result.ai_enabled ? (result.ai_warning ? `模型总结未生成：${result.ai_warning}` : "模型总结已启用。") : "模型未配置，当前展示本地规则分析结果。";
+    statusEl.textContent = `${aiLine}${configLine ? ` ${configLine}。` : ""}${result.generated_at ? ` 扫描时间：${fmtTime(result.generated_at)}。` : ""}`;
+
+    resultsEl.innerHTML = `
+      <div class="cleanup-summary-pills">
+        <div class="cleanup-pill cleanup-pill-green">可直接清理 ${escapeHtml(result.totals && result.totals.green ? result.totals.green.label : "0 B")}</div>
+        <div class="cleanup-pill cleanup-pill-yellow">需人工确认 ${escapeHtml(result.totals && result.totals.yellow ? result.totals.yellow.label : "0 B")}</div>
+        <div class="cleanup-pill cleanup-pill-red">高风险目录 ${escapeHtml(result.totals && result.totals.red ? result.totals.red.label : "0 B")}</div>
+      </div>
+      <div class="cleanup-overview">
+        <strong>执行建议</strong>
+        <p>${escapeHtml(result.summary && result.summary.overview ? result.summary.overview : "未生成摘要。")}</p>
+      </div>
+      <div class="cleanup-priority-box">
+        <strong>优先顺序</strong>
+        <ul>${priorities.map((item) => `<li>${escapeHtml(item)}</li>`).join("") || "<li>当前没有明显的大体积清理项。</li>"}</ul>
+      </div>
+      <div class="cleanup-risk-box">
+        <strong>风险提示</strong>
+        <p>${escapeHtml(result.summary && result.summary.risk ? result.summary.risk : "删除前请先确认目录内容。")}</p>
+      </div>
+      ${drives.length ? `<div class="cleanup-drive-grid">${drives.map(renderDriveCard).join("")}</div>` : ""}
+      ${renderCleanupSection("绿灯：适合直接清理", greenItems, "pure", "没有识别到可直接清理的大缓存。")}
+      ${renderCleanupSection("黄灯：先人工确认", yellowItems, "review", "没有识别到需要重点复核的用户目录。")}
+      ${renderCleanupSection("红灯：不要直接整目录删", redItems, "risk", "当前没有额外的高风险目录提示。")}
+      ${inaccessible.length ? `<div class="cleanup-footnote">有 ${inaccessible.length} 个目录无法完整读取，通常是权限不足或文件被占用导致。</div>` : ""}
+    `;
+
+    resultsEl.querySelectorAll("[data-clean-open]").forEach((button) => {
+      button.onclick = () => {
+        if (cleanupLayerIndex !== null) layer.close(cleanupLayerIndex);
+        browse(agentId, decodeURIComponent(button.dataset.cleanOpen));
+      };
+    });
+    resultsEl.querySelectorAll("[data-clean-delete]").forEach((button) => {
+      button.onclick = () => deleteCleanupPath(agentId, decodeURIComponent(button.dataset.cleanDelete), button.dataset.label || "");
+    });
+  }
+
+  function renderCleanupSection(title, items, tone, emptyText) {
+    return `
+      <section class="cleanup-section">
+        <div class="cleanup-section-head">
+          <h3>${escapeHtml(title)}</h3>
+          <span>${items.length} 项</span>
+        </div>
+        ${items.length ? `<div class="cleanup-card-grid">${items.map((item) => renderCleanupItem(item, tone)).join("")}</div>` : `<div class="cleanup-empty">${escapeHtml(emptyText)}</div>`}
+      </section>
+    `;
+  }
+
+  function renderCleanupItem(item, tone) {
+    return `
+      <article class="cleanup-card cleanup-card-${tone}">
+        <div class="cleanup-card-top">
+          <div>
+            <h4>${escapeHtml(item.label || baseName(item.path || ""))}</h4>
+            <div class="cleanup-card-path">${escapeHtml(item.path || "")}</div>
+          </div>
+          <strong>${escapeHtml(item.size_label || fmtSize(item.size))}</strong>
+        </div>
+        <p>${escapeHtml(item.reason || "")}</p>
+        <div class="cleanup-card-hint">${escapeHtml(item.hint || "")}</div>
+        <div class="cleanup-card-actions">
+          ${(Array.isArray(item.actions) ? item.actions : []).map((action) => action.type === "delete"
+            ? `<button class="layui-btn layui-btn-danger layui-btn-sm" data-clean-delete="${encodeURIComponent(action.path)}" data-label="${escapeHtml(item.label || "")}">${escapeHtml(action.label)}</button>`
+            : `<button class="layui-btn layui-btn-primary layui-btn-sm" data-clean-open="${encodeURIComponent(action.path)}">${escapeHtml(action.label)}</button>`).join("")}
+        </div>
+      </article>
+    `;
+  }
+
+  function renderDriveCard(drive) {
+    const total = Number(drive.total || 0);
+    const free = Number(drive.free || 0);
+    const used = total > 0 ? Math.max(total - free, 0) : 0;
+    const percent = total > 0 ? Math.min((used / total) * 100, 100) : 0;
+    return `
+      <div class="cleanup-drive-card">
+        <div class="cleanup-drive-top">
+          <strong>${escapeHtml(drive.root || "磁盘")}</strong>
+          <span>${escapeHtml(drive.kind || "")}</span>
+        </div>
+        <div class="cleanup-drive-bar"><span style="width:${percent.toFixed(1)}%"></span></div>
+        <div class="cleanup-drive-meta">${fmtSize(used)} 已用 / ${fmtSize(free)} 可用</div>
+      </div>
+    `;
+  }
+
+  async function deleteCleanupPath(agentId, path, label) {
+    layer.confirm(`确定清理「${escapeHtml(label || baseName(path))}」？这会删除该目录下当前扫描命中的缓存内容。`, { title: "清理确认" }, async (index) => {
+      layer.close(index);
+      const loading = layer.load(2);
+      try {
+        await api(`/api/agents/${encodeURIComponent(agentId)}/file?path=${encodeURIComponent(path)}`, { method: "DELETE" });
+        layer.msg("清理成功", { icon: 1 });
+        if (state.selectedAgent === agentId && state.currentPath) browse(agentId, state.currentPath, { skipHistory: true });
+        await runCleanupAnalysisFromDialog();
+      } catch (error) {
+        layer.msg(error.message || "清理失败", { icon: 2 });
+      } finally {
+        layer.close(loading);
+      }
+    });
+  }
+
   async function runCommandFromDialog() {
     const agentSelect = document.querySelector("#commandAgent");
     const commandInput = document.querySelector("#commandInput");
@@ -542,5 +902,21 @@
 
   function editorHeight() {
     return window.innerHeight < 700 ? "82vh" : "620px";
+  }
+
+  function cleanupWidth() {
+    return window.innerWidth < 980 ? "96vw" : "980px";
+  }
+
+  function cleanupHeight() {
+    return window.innerHeight < 760 ? "88vh" : "720px";
+  }
+
+  function settingsWidth() {
+    return window.innerWidth < 700 ? "94vw" : "680px";
+  }
+
+  function settingsHeight() {
+    return window.innerHeight < 680 ? "80vh" : "560px";
   }
 })();
