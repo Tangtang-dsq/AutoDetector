@@ -171,7 +171,14 @@ function createRequestHandler(options) {
       const storageMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/storage-analysis$/);
       if (req.method === "POST" && storageMatch) {
         const agentId = decodeURIComponent(storageMatch[1]);
-        const result = await storageAssistant.analyzeAgent(agentId);
+        const result = storageAssistant.startAnalysisJob(agentId);
+        sendJson(res, 202, result);
+        return;
+      }
+
+      const storageJobMatch = url.pathname.match(/^\/api\/storage-analysis-jobs\/([^/]+)$/);
+      if (req.method === "GET" && storageJobMatch) {
+        const result = storageAssistant.getAnalysisJob(decodeURIComponent(storageJobMatch[1]));
         sendJson(res, 200, result);
         return;
       }

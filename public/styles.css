@@ -309,6 +309,38 @@ body {
 .cleanup-progress-meta span {
   color: var(--muted);
 }
+.cleanup-live-card {
+  padding: 16px;
+  border: 1px dashed #c5d4ea;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #fbfdff, #f6f9fd);
+}
+.cleanup-live-card strong {
+  display: block;
+  margin-bottom: 8px;
+  color: #213547;
+}
+.cleanup-live-card p {
+  margin: 0 0 12px;
+  color: #5b6b7f;
+  line-height: 1.6;
+}
+.cleanup-live-preview,
+.cleanup-live-placeholder {
+  margin: 0;
+  padding: 12px;
+  border-radius: 10px;
+  background: #0f172a;
+  color: #dbe7f6;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.cleanup-live-placeholder {
+  background: #eef4fb;
+  color: #607086;
+}
 .cleanup-results {
   max-height: min(540px, calc(88vh - 180px));
   overflow: auto;

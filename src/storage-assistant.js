@@ -1,5 +1,6 @@
 "use strict";
 
+const crypto = require("crypto");
 const { httpError } = require("./http-utils");
 
 const GREEN_TARGETS = new Map([
@@ -87,9 +88,11 @@ const PROFILE_YELLOW_NAMES = new Set([
 
 const PROFILE_RED_NAMES = new Set(["appdata"]);
 const MIN_PROFILE_CHILD_BYTES = 256 * 1024 * 1024;
+const JOB_RETENTION_MS = 30 * 60 * 1000;
 
 function createStorageAssistant(options) {
   const { registry, getAiConfig } = options;
+  const jobs = new Map();
 
   return {
     async analyzeAgent(agentId) {
@@ -104,6 +107,18 @@ function createStorageAssistant(options) {
         aiWarning = error && error.message ? String(error.message) : "storage AI request failed";
       }
       return mergeAnalysis(base, ai, scan, Boolean(aiConfig && aiConfig.apiKey), aiWarning, aiConfig);
+    },
+    startAnalysisJob(agentId) {
+      pruneJobs(jobs);
+      const job = createAnalysisJob(agentId);
+      jobs.set(job.id, job);
+      runAnalysisJob(job, registry, getAiConfig).catch(() => {});
+      return serializeJob(job);
+    },
+    getAnalysisJob(jobId) {
+      const job = jobs.get(String(jobId || ""));
+      if (!job) throw httpError(404, "analysis job not found");
+      return serializeJob(job);
     },
     async testConnection() {
       const aiConfig = getAiConfig();
@@ -134,6 +149,116 @@ function createStorageAssistant(options) {
       }
     },
   };
+}
+
+async function runAnalysisJob(job, registry, getAiConfig) {
+  try {
+    setJobProgress(job, 8, "已提交分析任务", "正在联系目标设备并准备开始扫描。");
+    setJobProgress(job, 18, "正在扫描设备目录", "正在等待目标设备返回缓存、下载目录和用户目录统计。");
+    const scan = await registry.sendCommand(job.agentId, "storage_scan", {}, 240000);
+
+    setJobProgress(job, 52, "已收到设备扫描结果", "正在整理本地规则分析结果。");
+    const base = buildDeterministicAnalysis(scan);
+    const aiConfig = getAiConfig();
+
+    if (!aiConfig || !aiConfig.apiKey) {
+      const result = mergeAnalysis(base, null, scan, false, "", aiConfig);
+      completeJob(job, result, "模型未配置，已返回本地规则分析结果。");
+      return;
+    }
+
+    setJobProgress(job, 68, "正在请求大模型", "已生成扫描摘要，正在把关键信息发送给模型。");
+    let ai = null;
+    let aiWarning = "";
+    try {
+      ai = await buildAiSummary(scan, base, aiConfig, (update) => {
+        const preview = update && update.preview ? update.preview : "";
+        const received = update && typeof update.receivedChars === "number" ? update.receivedChars : 0;
+        const percent = Math.min(96, 76 + Math.min(18, Math.floor(received / 80)));
+        setJobProgress(
+          job,
+          percent,
+          "大模型正在分析",
+          received ? `已接收模型输出 ${received} 字。` : "模型已开始返回分析内容。",
+          preview,
+        );
+      });
+    } catch (error) {
+      aiWarning = error && error.message ? String(error.message) : "storage AI request failed";
+    }
+
+    setJobProgress(job, 97, "正在整理最终结果", "正在合并扫描结果和模型分析。");
+    const result = mergeAnalysis(base, ai, scan, true, aiWarning, aiConfig);
+    completeJob(job, result, aiWarning ? `模型总结未生成：${aiWarning}` : "分析完成。");
+  } catch (error) {
+    failJob(job, error && error.message ? String(error.message) : "analysis failed");
+  }
+}
+
+function createAnalysisJob(agentId) {
+  const now = Date.now();
+  return {
+    id: crypto.randomUUID(),
+    agentId,
+    status: "running",
+    createdAt: now,
+    updatedAt: now,
+    progress: {
+      percent: 0,
+      stage: "等待开始",
+      detail: "任务已创建，等待开始。",
+      preview: "",
+    },
+    result: null,
+    error: "",
+  };
+}
+
+function serializeJob(job) {
+  return {
+    job_id: job.id,
+    agent_id: job.agentId,
+    status: job.status,
+    created_at: Math.floor(job.createdAt / 1000),
+    updated_at: Math.floor(job.updatedAt / 1000),
+    progress: {
+      percent: job.progress.percent,
+      stage: job.progress.stage,
+      detail: job.progress.detail,
+      preview: job.progress.preview || "",
+    },
+    result: job.status === "completed" ? job.result : null,
+    error_detail: job.status === "failed" ? job.error : "",
+  };
+}
+
+function setJobProgress(job, percent, stage, detail, preview) {
+  job.updatedAt = Date.now();
+  job.progress = {
+    percent: Math.max(0, Math.min(100, Math.floor(percent || 0))),
+    stage: stage || job.progress.stage,
+    detail: detail || job.progress.detail,
+    preview: typeof preview === "string" ? preview : (job.progress.preview || ""),
+  };
+}
+
+function completeJob(job, result, detail) {
+  job.status = "completed";
+  job.result = result;
+  setJobProgress(job, 100, "分析完成", detail || "分析完成。", "");
+}
+
+function failJob(job, detail) {
+  job.status = "failed";
+  job.error = detail || "analysis failed";
+  setJobProgress(job, job.progress.percent || 0, "分析失败", job.error, "");
+}
+
+function pruneJobs(jobs) {
+  const cutoff = Date.now() - JOB_RETENTION_MS;
+  for (const [jobId, job] of jobs.entries()) {
+    if (job.updatedAt < cutoff) jobs.delete(jobId);
+  }
 }
 
 function buildDeterministicAnalysis(scan) {
@@ -257,7 +382,7 @@ function priorityText(tier) {
   return "属于高风险目录，别直接整目录删";
 }
 
-async function buildAiSummary(scan, analysis, aiConfig) {
+async function buildAiSummary(scan, analysis, aiConfig, onProgress) {
   if (!aiConfig || !aiConfig.apiKey) return null;
 
   const payload = {
@@ -289,7 +414,7 @@ async function buildAiSummary(scan, analysis, aiConfig) {
   const raw = await requestChatCompletion(aiConfig, [
     { role: "system", content: prompt },
     { role: "user", content: JSON.stringify(payload) },
-  ]);
+  ], { onProgress });
   const parsed = tryParseLooseJson(raw);
   if (!parsed || typeof parsed !== "object") return null;
   return {
@@ -347,10 +472,11 @@ function publicAiConfig(aiConfig) {
   };
 }
 
-async function requestChatCompletion(aiConfig, messages) {
+async function requestChatCompletion(aiConfig, messages, options = {}) {
   const endpoint = joinUrl(aiConfig.baseUrl, "/v1/chat/completions");
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), aiConfig.timeoutMs || 45000);
+  const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
   try {
     const response = await fetch(endpoint, {
       method: "POST",
@@ -361,6 +487,7 @@ async function requestChatCompletion(aiConfig, messages) {
       body: JSON.stringify({
         model: aiConfig.model,
         temperature: 0.2,
+        stream: Boolean(onProgress),
         messages,
       }),
       signal: controller.signal,
@@ -369,12 +496,84 @@ async function requestChatCompletion(aiConfig, messages) {
       const detail = await safeResponseText(response);
       throw httpError(502, `storage AI request failed: ${detail || response.status}`);
     }
+    if (onProgress && response.body && String(response.headers.get("content-type") || "").includes("text/event-stream")) {
+      return await readChatCompletionStream(response, onProgress);
+    }
     const payload = await response.json();
     const content = payload && payload.choices && payload.choices[0] && payload.choices[0].message ? payload.choices[0].message.content : "";
     return normalizeChatContent(content);
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function readChatCompletionStream(response, onProgress) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let raw = "";
+  let content = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    raw += decoder.decode(value || new Uint8Array(0), { stream: !done });
+
+    let splitIndex = raw.indexOf("\n\n");
+    while (splitIndex >= 0) {
+      const event = raw.slice(0, splitIndex);
+      raw = raw.slice(splitIndex + 2);
+      handleStreamEvent(event, (delta) => {
+        if (!delta) return;
+        content += delta;
+        onProgress({
+          receivedChars: content.length,
+          preview: content.slice(-240),
+        });
+      });
+      splitIndex = raw.indexOf("\n\n");
+    }
+
+    if (done) break;
+  }
+
+  if (raw.trim()) {
+    handleStreamEvent(raw, (delta) => {
+      if (!delta) return;
+      content += delta;
+      onProgress({
+        receivedChars: content.length,
+        preview: content.slice(-240),
+      });
+    });
+  }
+
+  return content;
+}
+
+function handleStreamEvent(eventText, onDelta) {
+  const lines = String(eventText || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    if (!line.startsWith("data:")) continue;
+    const data = line.slice(5).trim();
+    if (!data || data === "[DONE]") continue;
+    try {
+      const payload = JSON.parse(data);
+      const delta = extractStreamDelta(payload);
+      if (delta) onDelta(delta);
+    } catch {
+    }
+  }
+}
+
+function extractStreamDelta(payload) {
+  const choice = payload && Array.isArray(payload.choices) ? payload.choices[0] : null;
+  if (!choice) return "";
+  if (choice.delta && typeof choice.delta.content === "string") return choice.delta.content;
+  if (choice.message) return normalizeChatContent(choice.message.content);
+  return "";
 }
 
 function normalizeChatContent(content) {

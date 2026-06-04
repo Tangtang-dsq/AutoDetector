@@ -24,8 +24,8 @@
   const logoutButton = $("#logoutButton");
   let cleanupLayerIndex = null;
   let modelSettingsLayerIndex = null;
-  let cleanupProgressTimer = null;
-  let cleanupProgressValue = 0;
+  let cleanupPollTimer = null;
+  let cleanupRequestToken = 0;
 
   layui.use(["layer"], function () {
     layer = layui.layer;
@@ -474,7 +474,7 @@
         runCleanupAnalysisFromDialog();
       },
       end: () => {
-        stopCleanupProgress();
+        stopCleanupTracking();
         cleanupLayerIndex = null;
       },
     });
@@ -659,17 +659,19 @@
 
     runButton.disabled = true;
     runButton.textContent = "分析中...";
-    statusEl.textContent = "正在读取设备上的常见缓存和大目录，请稍候...";
+    statusEl.textContent = "正在创建分析任务...";
     resultsEl.innerHTML = loadingHtml();
-    startCleanupProgress();
+    stopCleanupTracking();
+    cleanupRequestToken += 1;
+    const requestToken = cleanupRequestToken;
     try {
       const res = await api(`/api/agents/${encodeURIComponent(agentId)}/storage-analysis`, { method: "POST" });
-      const result = await res.json();
-      finishCleanupProgress("分析完成");
-      renderCleanupAnalysis(agentId, result);
+      const job = await res.json();
+      renderCleanupJob(job);
+      await pollCleanupJob(job.job_id, agentId, requestToken);
     } catch (error) {
       const detail = formatCleanupError(error);
-      failCleanupProgress("分析失败");
+      renderCleanupProgress("分析失败", 0);
       statusEl.textContent = detail;
       resultsEl.innerHTML = emptyHtml("error", detail);
       layer.msg(detail, { icon: 2 });
@@ -677,6 +679,61 @@
       runButton.disabled = false;
       runButton.textContent = "开始分析";
     }
+  }
+
+  async function pollCleanupJob(jobId, agentId, requestToken) {
+    const statusEl = document.querySelector("#cleanupStatus");
+    const resultsEl = document.querySelector("#cleanupResults");
+    const runButton = document.querySelector("#runCleanupButton");
+    if (!statusEl || !resultsEl || !runButton) return;
+
+    while (cleanupLayerIndex !== null && requestToken === cleanupRequestToken) {
+      const res = await api(`/api/storage-analysis-jobs/${encodeURIComponent(jobId)}`);
+      const job = await res.json();
+      renderCleanupJob(job);
+      if (job.status === "completed") {
+        renderCleanupAnalysis(agentId, job.result);
+        return;
+      }
+      if (job.status === "failed") {
+        const detail = job.error_detail || "分析失败";
+        statusEl.textContent = detail;
+        resultsEl.innerHTML = emptyHtml("error", detail);
+        layer.msg(detail, { icon: 2 });
+        return;
+      }
+      await waitForNextCleanupPoll(requestToken);
+    }
+  }
+
+  function waitForNextCleanupPoll(requestToken) {
+    stopCleanupTracking();
+    return new Promise((resolve) => {
+      cleanupPollTimer = setTimeout(() => {
+        if (requestToken === cleanupRequestToken) resolve();
+      }, 900);
+    });
+  }
+
+  function stopCleanupTracking() {
+    if (cleanupPollTimer) {
+      clearTimeout(cleanupPollTimer);
+      cleanupPollTimer = null;
+    }
+  }
+
+  function renderCleanupJob(job) {
+    const statusEl = document.querySelector("#cleanupStatus");
+    const resultsEl = document.querySelector("#cleanupResults");
+    if (!statusEl || !resultsEl || !job) return;
+
+    const progress = job.progress || {};
+    const stage = progress.stage || "正在分析";
+    const detail = progress.detail || "任务正在执行。";
+    const preview = progress.preview ? String(progress.preview).trim() : "";
+    renderCleanupProgress(stage, Number(progress.percent || 0));
+    statusEl.textContent = `${stage} ${detail}`;
+    resultsEl.innerHTML = pendingCleanupHtml(stage, detail, preview);
   }
 
   function renderCleanupAnalysis(agentId, result) {
@@ -863,46 +920,6 @@
     return `<div class="empty-state"><i class="layui-icon layui-icon-loading layui-anim layui-anim-rotate layui-anim-loop"></i><p>加载中...</p></div>`;
   }
 
-  function startCleanupProgress() {
-    stopCleanupProgress();
-    cleanupProgressValue = 6;
-    renderCleanupProgress("正在连接设备", cleanupProgressValue);
-    const stages = [
-      { limit: 22, step: 4, label: "正在连接设备" },
-      { limit: 46, step: 3, label: "正在扫描缓存目录" },
-      { limit: 72, step: 2, label: "正在统计文件大小" },
-      { limit: 88, step: 1, label: "正在整理分析结果" },
-      { limit: 94, step: 1, label: "正在生成最终摘要" },
-    ];
-    cleanupProgressTimer = setInterval(() => {
-      for (const stage of stages) {
-        if (cleanupProgressValue < stage.limit) {
-          cleanupProgressValue = Math.min(stage.limit, cleanupProgressValue + stage.step);
-          renderCleanupProgress(stage.label, cleanupProgressValue);
-          return;
-        }
-      }
-      renderCleanupProgress("正在等待设备返回结果", cleanupProgressValue);
-    }, 1100);
-  }
-
-  function finishCleanupProgress(label) {
-    stopCleanupProgress();
-    renderCleanupProgress(label || "分析完成", 100);
-  }
-
-  function failCleanupProgress(label) {
-    stopCleanupProgress();
-    renderCleanupProgress(label || "分析失败", cleanupProgressValue ? Math.min(cleanupProgressValue, 96) : 0);
-  }
-
-  function stopCleanupProgress() {
-    if (cleanupProgressTimer) {
-      clearInterval(cleanupProgressTimer);
-      cleanupProgressTimer = null;
-    }
-  }
-
   function renderCleanupProgress(label, percent) {
     const fillEl = document.querySelector("#cleanupProgressFill");
     const percentEl = document.querySelector("#cleanupProgressPercent");
@@ -922,6 +939,16 @@
       return "分析接口返回了网页内容，通常是反向代理超时或服务异常。";
     }
     return message;
+  }
+
+  function pendingCleanupHtml(stage, detail, preview) {
+    return `
+      <div class="cleanup-live-card">
+        <strong>${escapeHtml(stage || "正在分析")}</strong>
+        <p>${escapeHtml(detail || "任务正在执行。")}</p>
+        ${preview ? `<pre class="cleanup-live-preview">${escapeHtml(preview)}</pre>` : `<div class="cleanup-live-placeholder">正在等待模型返回更多分析内容...</div>`}
+      </div>
+    `;
   }
 
   function fmtSize(size) {
