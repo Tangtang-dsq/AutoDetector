@@ -24,6 +24,8 @@
   const logoutButton = $("#logoutButton");
   let cleanupLayerIndex = null;
   let modelSettingsLayerIndex = null;
+  let cleanupProgressTimer = null;
+  let cleanupProgressValue = 0;
 
   layui.use(["layer"], function () {
     layer = layui.layer;
@@ -452,6 +454,15 @@
           </div>
           <div class="cleanup-note">只读扫描常见缓存、下载目录和用户目录，不会自动删除任何内容。</div>
           <div id="cleanupStatus" class="cleanup-status">选择设备后开始扫描，绿灯项可直接清理，黄红灯项建议先打开目录复查。</div>
+          <div class="cleanup-progress" aria-hidden="true">
+            <div class="cleanup-progress-bar">
+              <span id="cleanupProgressFill"></span>
+            </div>
+            <div class="cleanup-progress-meta">
+              <strong id="cleanupProgressLabel">等待开始</strong>
+              <span id="cleanupProgressPercent">0%</span>
+            </div>
+          </div>
           <div id="cleanupResults" class="cleanup-results">
             ${emptyHtml("template", "等待开始分析。")}
           </div>
@@ -463,6 +474,7 @@
         runCleanupAnalysisFromDialog();
       },
       end: () => {
+        stopCleanupProgress();
         cleanupLayerIndex = null;
       },
     });
@@ -649,14 +661,18 @@
     runButton.textContent = "分析中...";
     statusEl.textContent = "正在读取设备上的常见缓存和大目录，请稍候...";
     resultsEl.innerHTML = loadingHtml();
+    startCleanupProgress();
     try {
       const res = await api(`/api/agents/${encodeURIComponent(agentId)}/storage-analysis`, { method: "POST" });
       const result = await res.json();
+      finishCleanupProgress("分析完成");
       renderCleanupAnalysis(agentId, result);
     } catch (error) {
-      statusEl.textContent = error.message || "分析失败";
-      resultsEl.innerHTML = emptyHtml("error", error.message || "分析失败");
-      layer.msg(error.message || "分析失败", { icon: 2 });
+      const detail = formatCleanupError(error);
+      failCleanupProgress("分析失败");
+      statusEl.textContent = detail;
+      resultsEl.innerHTML = emptyHtml("error", detail);
+      layer.msg(detail, { icon: 2 });
     } finally {
       runButton.disabled = false;
       runButton.textContent = "开始分析";
@@ -845,6 +861,67 @@
 
   function loadingHtml() {
     return `<div class="empty-state"><i class="layui-icon layui-icon-loading layui-anim layui-anim-rotate layui-anim-loop"></i><p>加载中...</p></div>`;
+  }
+
+  function startCleanupProgress() {
+    stopCleanupProgress();
+    cleanupProgressValue = 6;
+    renderCleanupProgress("正在连接设备", cleanupProgressValue);
+    const stages = [
+      { limit: 22, step: 4, label: "正在连接设备" },
+      { limit: 46, step: 3, label: "正在扫描缓存目录" },
+      { limit: 72, step: 2, label: "正在统计文件大小" },
+      { limit: 88, step: 1, label: "正在整理分析结果" },
+      { limit: 94, step: 1, label: "正在生成最终摘要" },
+    ];
+    cleanupProgressTimer = setInterval(() => {
+      for (const stage of stages) {
+        if (cleanupProgressValue < stage.limit) {
+          cleanupProgressValue = Math.min(stage.limit, cleanupProgressValue + stage.step);
+          renderCleanupProgress(stage.label, cleanupProgressValue);
+          return;
+        }
+      }
+      renderCleanupProgress("正在等待设备返回结果", cleanupProgressValue);
+    }, 1100);
+  }
+
+  function finishCleanupProgress(label) {
+    stopCleanupProgress();
+    renderCleanupProgress(label || "分析完成", 100);
+  }
+
+  function failCleanupProgress(label) {
+    stopCleanupProgress();
+    renderCleanupProgress(label || "分析失败", cleanupProgressValue ? Math.min(cleanupProgressValue, 96) : 0);
+  }
+
+  function stopCleanupProgress() {
+    if (cleanupProgressTimer) {
+      clearInterval(cleanupProgressTimer);
+      cleanupProgressTimer = null;
+    }
+  }
+
+  function renderCleanupProgress(label, percent) {
+    const fillEl = document.querySelector("#cleanupProgressFill");
+    const percentEl = document.querySelector("#cleanupProgressPercent");
+    const labelEl = document.querySelector("#cleanupProgressLabel");
+    if (fillEl) fillEl.style.width = `${Math.max(0, Math.min(percent, 100))}%`;
+    if (percentEl) percentEl.textContent = `${Math.round(Math.max(0, Math.min(percent, 100)))}%`;
+    if (labelEl) labelEl.textContent = label || "处理中";
+  }
+
+  function formatCleanupError(error) {
+    const message = error && error.message ? String(error.message).trim() : "";
+    if (!message) return "分析失败";
+    if (message === "Unexpected end of JSON input") {
+      return "分析请求被中断，设备可能在扫描过程中断线或浏览器提前取消了请求。";
+    }
+    if (message.includes("Unexpected token '<'")) {
+      return "分析接口返回了网页内容，通常是反向代理超时或服务异常。";
+    }
+    return message;
   }
 
   function fmtSize(size) {

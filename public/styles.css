@@ -273,6 +273,42 @@ body {
   color: var(--muted);
   font-size: 12px;
 }
+.cleanup-progress {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: #fff;
+}
+.cleanup-progress-bar {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e7edf5;
+}
+.cleanup-progress-bar span {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #0f9d8a, #49c5b6);
+  transition: width .45s ease;
+}
+.cleanup-progress-meta {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+}
+.cleanup-progress-meta strong {
+  color: #2c3e50;
+  font-weight: 700;
+}
+.cleanup-progress-meta span {
+  color: var(--muted);
+}
 .cleanup-results {
   max-height: min(540px, calc(88vh - 180px));
   overflow: auto;
